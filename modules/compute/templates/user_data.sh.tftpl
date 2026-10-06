@@ -1,0 +1,76 @@
+#!/bin/bash
+# Boot script for the UTC app servers. Runs once, as root, the first time a server starts.
+# Terraform fills in efs_id, log_group_name, s3_bucket_name, ssm_prefix and site_version
+# before the server sees this file.
+# Website and backend version: ${site_version}
+
+# --- Install the web server, the EFS helper and the CloudWatch agent ---
+dnf install -y httpd amazon-efs-utils amazon-cloudwatch-agent
+
+# --- Mount the shared EFS folder (kept outside the web root so it is not public) ---
+mkdir -p /mnt/efs
+echo "${efs_id}:/ /mnt/efs efs _netdev,tls,nofail 0 0" >> /etc/fstab
+# The EFS doorway can take a moment to be ready, so try a few times
+for attempt in 1 2 3 4 5 6; do
+  mount -a -t efs
+  mountpoint -q /mnt/efs && break
+  sleep 10
+done
+
+# --- Ship the web server and API logs to CloudWatch ---
+cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<'JSON'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/httpd/access_log",
+            "log_group_name": "${log_group_name}",
+            "log_stream_name": "{instance_id}/access"
+          },
+          {
+            "file_path": "/var/log/httpd/error_log",
+            "log_group_name": "${log_group_name}",
+            "log_stream_name": "{instance_id}/error"
+          },
+          {
+            "file_path": "/var/log/utc-api/api.log",
+            "log_group_name": "${log_group_name}",
+            "log_stream_name": "{instance_id}/api"
+          }
+        ]
+      }
+    }
+  }
+}
+JSON
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+
+# --- Copy the website from S3 (the server's IAM role allows this, no keys needed) ---
+aws s3 sync "s3://${s3_bucket_name}/site/" /var/www/html/ --delete
+
+# --- Tell the website which server this is, so the page can show it ---
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/placement/availability-zone)
+echo "{\"instanceId\":\"$INSTANCE_ID\",\"az\":\"$AZ\"}" > /var/www/html/server.json
+
+# --- Start the web server now and on every reboot ---
+systemctl enable --now httpd
+
+# --- Install and start the backend API ---
+# Done last, so a backend problem can never stop the website itself from coming up.
+aws s3 sync "s3://${s3_bucket_name}/backend/" /opt/utc-api/ --delete
+# Strip Windows line endings in case the files were saved on a Windows computer
+sed -i 's/\r$//' /opt/utc-api/deploy/install.sh /opt/utc-api/deploy/utc-api.service
+# The region is the AZ name without its last letter (us-east-1a -> us-east-1)
+export AWS_DEFAULT_REGION=$(echo "$AZ" | sed 's/.$//')
+export SSM_PREFIX="${ssm_prefix}"
+export S3_BUCKET="${s3_bucket_name}"
+bash /opt/utc-api/deploy/install.sh || echo "UTC API install failed; see the output above"

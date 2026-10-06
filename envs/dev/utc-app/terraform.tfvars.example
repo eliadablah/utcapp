@@ -1,0 +1,11 @@
+# Copy this file to terraform.tfvars and fill in your own values.
+# terraform.tfvars is ignored by Git, so your email and domain stay off GitHub.
+
+aws_region = "us-east-1"
+
+# Leave both empty to run on plain HTTP with the load balancer's own address
+domain_name      = ""
+hosted_zone_name = ""
+
+# Leave empty to skip email alerts
+notification_email = ""

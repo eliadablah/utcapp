@@ -1,0 +1,24 @@
+# systemd unit for the UTC API. install.sh replaces __NODE__ with the path to node.
+[Unit]
+Description=UTC Student Services API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=utcapi
+Group=utcapi
+WorkingDirectory=/opt/utc-api
+EnvironmentFile=/etc/utc-api.env
+ExecStart=__NODE__ src/server.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/utc-api/api.log
+StandardError=inherit
+
+# Hardening: no gaining extra privileges, read-only system folders, private /tmp
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
